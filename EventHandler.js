@@ -33,6 +33,29 @@ var LOCAL_IP_PREFIX = "172.16.";
 var LOCALHOST_IP    = "127.0.0.1";
 
 /**
+ * Enabled features: set to false to disable a feature as needed. Each feature's
+ * parameters remain in their own blocks below.
+ * @const {boolean} GEOBLOCK_ENABLED      country blocking (BLOCKED_COUNTRIES), all ports
+ * @const {boolean} GEORESTRICT_ENABLED   non-SMTP ports restricted to ALLOWED_GEO countries
+ * @const {boolean} ABUSEIPDB_ENABLED     AbuseIPDB reputation check (submission ports)
+ * @const {boolean} UNKNOWNUSER_ENABLED   ban of unauthenticated connections (OnClientLogon)
+ * @const {boolean} RCPTPROBE_ENABLED     recipient-probe counter (OnRecipientUnknown)
+ * @const {boolean} RECEIVEDANON_ENABLED  outbound Received header anonymisation
+ * @const {boolean} MESSAGEID_ENABLED     fills a missing Message-Id
+ * @const {boolean} SPAMREPORT_ENABLED    makes the X-Spam-Report header readable
+ * @const {boolean} SPAM_REJECT_ENABLED   SMTP rejection on high spam score (SPAM_REJECT_* config below)
+ */
+var GEOBLOCK_ENABLED     = true;
+var GEORESTRICT_ENABLED  = true;
+var ABUSEIPDB_ENABLED    = true;
+var UNKNOWNUSER_ENABLED  = true;
+var RCPTPROBE_ENABLED    = true;
+var RECEIVEDANON_ENABLED = true;
+var MESSAGEID_ENABLED    = true;
+var SPAMREPORT_ENABLED   = true;
+var SPAM_REJECT_ENABLED  = false;
+
+/**
  * Auto-ban durations per scenario. DateAdd unit: "d"=day, "h"=hour, "n"=minute, "s"=second.
  * Set qty to 0 to NOT ban (disconnect only).
  * @const {{qty:number,unit:string}} BAN_BADCOUNTRY   blocked countries (BLOCKED_COUNTRIES)
@@ -70,14 +93,12 @@ var LOCK_STALE_SEC = 30;
 /**
  * SMTP rejection of messages with a spam score that is too high, in OnAcceptMessage.
  * hMailServer's anti-spam tests (SpamAssassin included) run BEFORE this event, so the
- * score header is already present. Disabled by default: set ENABLED to true after
- * checking the header name produced by your configuration.
- * @const {boolean} SPAM_REJECT_ENABLED  enable rejection (false = does nothing)
+ * score header is already present. Enabled via SPAM_REJECT_ENABLED (features panel);
+ * check the header name produced by your configuration.
  * @const {number}  SPAM_REJECT_SCORE    score at or above which the message is rejected
  * @const {string}  SPAM_REJECT_HEADER   header holding the score (X-Spam-Score or X-Spam-Status)
  * @const {string}  SPAM_REJECT_MSG      SMTP refusal text (enhanced code, no "550"; the score is appended)
  */
-var SPAM_REJECT_ENABLED = false;
 var SPAM_REJECT_SCORE   = 15.0;
 var SPAM_REJECT_HEADER  = "X-Spam-Score";
 var SPAM_REJECT_MSG     = "5.7.1 Message rejected: spam score too high";
@@ -591,6 +612,7 @@ function RcptUnknownCount(ip) {
  */
 function OnClientLogon(oClient) {
     try {
+        if (!UNKNOWNUSER_ENABLED) return;
         var ip = String(oClient.IPAddress);
         if (isLocalIP(ip)) return;
 
@@ -616,16 +638,16 @@ function OnClientConnect(oClient) {
         var ip = String(oClient.IPAddress);
         if (isLocalIP(ip)) return;
 
-        var geo  = GeoLookup(ip);
         var port = String(oClient.Port);
+        var geo  = (GEOBLOCK_ENABLED || GEORESTRICT_ENABLED || ABUSEIPDB_ENABLED) ? GeoLookup(ip) : "-";
 
-        if (BLOCKED_COUNTRIES.indexOf("|" + geo + "|") > -1) {
+        if (GEOBLOCK_ENABLED && BLOCKED_COUNTRIES.indexOf("|" + geo + "|") > -1) {
             Result.Value = 1;
             BanAndDisconnect(ip, "Bad Country " + port, BAN_BADCOUNTRY, geo);
             return;
         }
 
-        if (SMTP_PORTS.indexOf("|" + port + "|") === -1) {
+        if (GEORESTRICT_ENABLED && SMTP_PORTS.indexOf("|" + port + "|") === -1) {
             if (ALLOWED_GEO.indexOf("|" + geo + "|") === -1) {
                 Result.Value = 1;
                 BanAndDisconnect(ip, "Geo restrict " + port, BAN_GEORESTRICT, geo);
@@ -633,7 +655,7 @@ function OnClientConnect(oClient) {
             }
         }
 
-        if (SUBMISSION_PORTS.indexOf("|" + port + "|") > -1) {
+        if (ABUSEIPDB_ENABLED && SUBMISSION_PORTS.indexOf("|" + port + "|") > -1) {
             if (ListedInAbuseIPDB(ip)) {
                 Result.Message = ABUSEIPDB_REJECT_MSG;
                 Result.Value = 2;
@@ -675,6 +697,7 @@ function OnAcceptMessage(oClient, oMessage) {
  */
 function OnDeliveryStart(oMessage) {
     try {
+        if (!RECEIVEDANON_ENABLED) return;
         var strReceived = oMessage.HeaderValue("Received");
         if (strReceived &&
             (strReceived.indexOf("ESMTPSA") !== -1 || strReceived.indexOf("ESMTPA") !== -1)) {
@@ -696,7 +719,7 @@ function OnDeliveryStart(oMessage) {
  */
 function OnDeliverMessage(oMessage) {
     try {
-        if (oMessage.HeaderValue("Message-Id") === "") {
+        if (MESSAGEID_ENABLED && oMessage.HeaderValue("Message-Id") === "") {
             var parts = String(oMessage.FromAddress).split("@");
             if (parts.length > 1 && parts[1] !== "") {
                 var utils = new ActiveXObject("hMailServer.Utilities");
@@ -706,10 +729,12 @@ function OnDeliverMessage(oMessage) {
             }
         }
 
-        var spam = oMessage.HeaderValue("X-Spam-Report");
-        if (spam !== "") {
-            oMessage.HeaderValue("X-Spam-Report") = String(spam).replace(/\*/g, "\r\n *");
-            oMessage.Save();
+        if (SPAMREPORT_ENABLED) {
+            var spam = oMessage.HeaderValue("X-Spam-Report");
+            if (spam !== "") {
+                oMessage.HeaderValue("X-Spam-Report") = String(spam).replace(/\*/g, "\r\n *");
+                oMessage.Save();
+            }
         }
     } catch (e) {
         try { Log("System", "", "", "", "OnDeliverMessage error - " + e.description); } catch (e2) {}
@@ -725,6 +750,7 @@ function OnDeliverMessage(oMessage) {
  */
 function OnRecipientUnknown(oClient, oMessage) {
     try {
+        if (!RCPTPROBE_ENABLED) return;
         var ip = String(oClient.IPAddress);
         if (isLocalIP(ip)) return;
         if (oClient.Authenticated) return;

@@ -23,6 +23,9 @@ outbound headers, and writes a single, column-aligned log file per day.
   database.
 * Outbound `Received` header anonymisation (removes the client IP).
 * Fills a missing `Message-Id` and reformats `X-Spam-Report` so it is readable.
+* Optional SMTP rejection of messages whose spam score is above a threshold. It
+  reads the score your anti-spam layer already added (for example SpamAssassin's
+  `X-Spam-Score`, or the `score=` field of `X-Spam-Status`). Off by default.
 * Daily log with fixed-width, aligned columns, UTF-8 without BOM. One line per
   event.
 
@@ -74,6 +77,8 @@ All settings sit at the top of the file:
 * `RCPT_UNKNOWN_*`: threshold, window and ban duration for the recipient-probe
   counter.
 * `LOG_SOURCES`: turn each log category on or off.
+* `SPAM_REJECT_*`: optional rejection of high-spam-score messages (enable flag,
+  score threshold, header name to read, refusal text). Off by default.
 * Local network exemption (`LOCAL_IP_PREFIX`, `LOCALHOST_IP`).
 
 ### Order of checks on connect
@@ -104,6 +109,11 @@ separated by two or more spaces, so a log line can be split on `/ {2,}/`.
   `BAN_GEORESTRICT` `qty` to `0` to only disconnect.
 * Bans are stored as IP ranges and are removed automatically when they expire.
   Long ban durations on high-volume sources will accumulate more ranges.
+* Spam-score rejection is off by default and needs an anti-spam layer that adds
+  a score header before the message is accepted (SpamAssassin does this). If you
+  also use hMailServer's built-in spam delete threshold, keep only one of the
+  two: the built-in threshold deletes silently, while the script returns a 550
+  to the sender.
 * The script is written for the classic JScript engine used by hMailServer.
   `oMessage.HeaderValue("X") = value` is the correct way to set a header there
   and matches hMailServer's own tests; it is not standard browser JavaScript.
@@ -135,6 +145,9 @@ sortants et écrit un seul fichier de log par jour, en colonnes alignées.
 * Anonymisation de l'en-tête `Received` sortant (retire l'IP du client).
 * Complète un `Message-Id` manquant et remet en forme `X-Spam-Report` pour le
   rendre lisible.
+* Rejet SMTP optionnel des messages dont le score de spam dépasse un seuil. Il
+  lit le score déjà ajouté par ta couche anti-spam (par exemple le `X-Spam-Score`
+  de SpamAssassin, ou le champ `score=` de `X-Spam-Status`). Désactivé par défaut.
 * Log quotidien en colonnes de largeur fixe, UTF-8 sans BOM. Une ligne par
   évènement.
 
@@ -190,6 +203,8 @@ Tous les paramètres se trouvent en tête de fichier :
   délimitées par des barres, par exemple `"|cn|cz|ru|"`.
 * `RCPT_UNKNOWN_*` : seuil, fenêtre et durée de ban du compteur de sondes.
 * `LOG_SOURCES` : active ou coupe chaque catégorie de log.
+* `SPAM_REJECT_*` : rejet optionnel des messages à score de spam élevé (drapeau
+  d'activation, seuil, nom de l'en-tête à lire, texte du refus). Désactivé par défaut.
 * Exemption du réseau local (`LOCAL_IP_PREFIX`, `LOCALHOST_IP`).
 
 ### Ordre des contrôles à la connexion
@@ -223,6 +238,11 @@ sont séparés par au moins deux espaces, on peut donc découper une ligne sur
 * Les bans sont stockés en plages d'IP et supprimés automatiquement à
   expiration. Des durées longues sur des sources à fort volume accumulent
   davantage de plages.
+* Le rejet sur score de spam est désactivé par défaut et suppose une couche
+  anti-spam qui ajoute un en-tête de score avant l'acceptation du message
+  (SpamAssassin le fait). Si tu utilises aussi le seuil de suppression natif de
+  hMailServer, n'en garde qu'un seul : le seuil natif supprime silencieusement,
+  le script renvoie un 550 à l'expéditeur.
 * Le script vise le moteur JScript classique utilisé par hMailServer.
   `oMessage.HeaderValue("X") = valeur` y est la bonne façon de définir un
   en-tête et correspond aux propres tests de hMailServer ; ce n'est pas du

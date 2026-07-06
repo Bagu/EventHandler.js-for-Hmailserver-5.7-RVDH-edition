@@ -9,17 +9,6 @@
 /* ==========================  Settings  =============================== */
 var ADMIN    = "YOUR_ADMIN_USERNAME";
 var PASSWORD = "YOUR_ADMIN_PASSWORD";
-var ABUSEIPDB_APIKEY = "YOUR_ABUSEIPDB_API_KEY";
-
-/**
- * AbuseIPDB settings.
- * @const {number} ABUSEIPDB_MAX_CONFIDENCE  max tolerated confidence score (above -> blocked)
- * @const {number} ABUSEIPDB_MAX_AGE_DAYS    max age (days) of reports taken into account
- * @const {string} ABUSEIPDB_REJECT_MSG      SMTP message returned on rejection
- */
-var ABUSEIPDB_MAX_CONFIDENCE = 40;
-var ABUSEIPDB_MAX_AGE_DAYS   = 90;
-var ABUSEIPDB_REJECT_MSG = "4.7.1 Your access to this mail system has been rejected due to the sending MTA's poor reputation (AbuseIPDB). If you believe that this failure is in error, please contact the intended recipient via alternate means.";
 var LOGDIR    = "C:\\path\\to\\your\\logs";
 var LOGPREFIX = "events";
 var DISCONNECT_EXE = "C:\\path\\to\\Disconnect.exe";
@@ -33,84 +22,62 @@ var LOCAL_IP_PREFIX = "172.16.";
 var LOCALHOST_IP    = "127.0.0.1";
 
 /**
- * Enabled features: set to false to disable a feature as needed. Each feature's
- * parameters remain in their own blocks below.
- * @const {boolean} GEOBLOCK_ENABLED      country blocking (BLOCKED_COUNTRIES), all ports
- * @const {boolean} GEORESTRICT_ENABLED   non-SMTP ports restricted to ALLOWED_GEO countries
- * @const {boolean} ABUSEIPDB_ENABLED     AbuseIPDB reputation check (submission ports)
- * @const {boolean} UNKNOWNUSER_ENABLED   ban of unauthenticated connections (OnClientLogon)
- * @const {boolean} RCPTPROBE_ENABLED     recipient-probe counter (OnRecipientUnknown)
+ * Filtering features: each feature can be disabled (enabled) and its action chosen
+ * — "ban" (creates a persistent temporary security range then drops the session)
+ * or "reject" (refuses only the current session with a professional SMTP message,
+ * no ban). The message is only returned by events that allow it (connection, message
+ * acceptance).
+ * Ban unit (DateAdd): "d"=day, "h"=hour, "n"=minute, "s"=second; ban.qty=0 => no ban.
+ * @const {{enabled:boolean,action:string,ban:{qty:number,unit:string},msg:string}} GEOBLOCK  blocked countries (all ports)
+ * @const {object} GEORESTRICT  non-SMTP ports restricted to ALLOWED_GEO countries
+ * @const {object} ABUSEIPDB    AbuseIPDB reputation (submission ports); + apikey, maxConfidence, maxAgeDays
+ * @const {object} UNKNOWNUSER  unauthenticated connection (OnClientLogon)
+ * @const {object} RCPTPROBE    recipient probes (OnRecipientUnknown); + threshold, windowMin
+ * @const {object} SPAMREJECT   high spam score (OnAcceptMessage); + score, header
+ */
+var GEOBLOCK    = { enabled: true,  action: "ban",    ban: { qty: 7, unit: "d" },
+                    msg: "5.7.1 Connection refused: connections from your location are not accepted by this server." };
+var GEORESTRICT = { enabled: true,  action: "ban",    ban: { qty: 1, unit: "d" },
+                    msg: "5.7.1 Connection refused: access from your location is not permitted for this service." };
+var ABUSEIPDB   = { enabled: true,  action: "ban",    ban: { qty: 1, unit: "d" },
+                    apikey: "YOUR_ABUSEIPDB_API_KEY",
+                    maxConfidence: 40, maxAgeDays: 90,
+                    msg: "5.7.1 Connection refused: your IP address has an unacceptable reputation (AbuseIPDB). If you believe this is an error, please contact the recipient by other means." };
+var UNKNOWNUSER = { enabled: true,  action: "ban",    ban: { qty: 1, unit: "d" },
+                    msg: "5.7.1 Access denied: authentication is required." };
+var RCPTPROBE   = { enabled: true,  action: "ban",    ban: { qty: 1, unit: "d" },
+                    threshold: 3, windowMin: 10,
+                    msg: "5.7.1 Access denied: too many invalid recipients." };
+var SPAMREJECT  = { enabled: false, action: "reject", ban: { qty: 1, unit: "d" },
+                    score: 15.0, header: "X-Spam-Score",
+                    msg: "5.7.1 Message rejected: the message was classified as spam (score too high)." };
+
+/**
+ * Header-transformation features (no ban/reject action): simple on/off.
  * @const {boolean} RECEIVEDANON_ENABLED  outbound Received header anonymisation
  * @const {boolean} MESSAGEID_ENABLED     fills a missing Message-Id
  * @const {boolean} SPAMREPORT_ENABLED    makes the X-Spam-Report header readable
- * @const {boolean} SPAM_REJECT_ENABLED   SMTP rejection on high spam score (SPAM_REJECT_* config below)
  */
-var GEOBLOCK_ENABLED     = true;
-var GEORESTRICT_ENABLED  = true;
-var ABUSEIPDB_ENABLED    = true;
-var UNKNOWNUSER_ENABLED  = true;
-var RCPTPROBE_ENABLED    = true;
 var RECEIVEDANON_ENABLED = true;
 var MESSAGEID_ENABLED    = true;
 var SPAMREPORT_ENABLED   = true;
-var SPAM_REJECT_ENABLED  = false;
+
+/** @const {number} BAN_PRIORITY  priority of created ranges (must exceed the "Internet" ranges). */
+var BAN_PRIORITY = 20;
 
 /**
- * Auto-ban durations per scenario. DateAdd unit: "d"=day, "h"=hour, "n"=minute, "s"=second.
- * Set qty to 0 to NOT ban (disconnect only).
- * @const {{qty:number,unit:string}} BAN_BADCOUNTRY   blocked countries (BLOCKED_COUNTRIES)
- * @const {{qty:number,unit:string}} BAN_GEORESTRICT  non-SMTP port outside ALLOWED_GEO
- * @const {{qty:number,unit:string}} BAN_ABUSEIPDB    IP listed on AbuseIPDB
- * @const {{qty:number,unit:string}} BAN_UNKNOWNUSER  authentication failure (OnClientLogon)
- * @const {number} BAN_PRIORITY  priority of created ranges (must exceed the "Internet" ranges)
- */
-var BAN_BADCOUNTRY  = { qty: 7, unit: "d" };
-var BAN_GEORESTRICT = { qty: 1, unit: "d" };
-var BAN_ABUSEIPDB   = { qty: 1, unit: "d" };
-var BAN_UNKNOWNUSER = { qty: 1, unit: "d" };
-var BAN_PRIORITY    = 20;
-
-/**
- * Recipient probes (OnRecipientUnknown): bans an IP once a number of unknown
- * recipients is reached within a sliding window, using a counter file
- * (no database required).
- * @const {number} RCPT_UNKNOWN_THRESHOLD   unknown recipients per IP before ban
- * @const {number} RCPT_UNKNOWN_WINDOW_MIN  sliding window, in minutes, to reach the threshold
- * @const {{qty:number,unit:string}} RCPT_UNKNOWN_BAN  ban duration once the threshold is reached
+ * Recipient-probe counter — file/lock infrastructure (business parameters are in
+ * RCPTPROBE: threshold, windowMin, ban). No database required.
  * @const {string} RCPT_DATA_FILE  counter file name (inside LOGDIR)
  * @const {string} RCPT_LOCK_FILE  lock file name (inside LOGDIR)
  * @const {number} LOCK_TRIES      number of lock acquisition attempts
  * @const {number} LOCK_STALE_SEC  age (s) beyond which a lock is considered orphaned
  */
-var RCPT_UNKNOWN_THRESHOLD  = 3;
-var RCPT_UNKNOWN_WINDOW_MIN = 10;
-var RCPT_UNKNOWN_BAN        = { qty: 1, unit: "d" };
 var RCPT_DATA_FILE = "rcpt_unknown.dat";
 var RCPT_LOCK_FILE = "rcpt_unknown.lock";
 var LOCK_TRIES     = 20;
 var LOCK_STALE_SEC = 30;
 
-/**
- * SMTP rejection of messages with a spam score that is too high, in OnAcceptMessage.
- * hMailServer's anti-spam tests (SpamAssassin included) run BEFORE this event, so the
- * score header is already present. Enabled via SPAM_REJECT_ENABLED (features panel);
- * check the header name produced by your configuration.
- * @const {number}  SPAM_REJECT_SCORE    score at or above which the message is rejected
- * @const {string}  SPAM_REJECT_HEADER   header holding the score (X-Spam-Score or X-Spam-Status)
- * @const {string}  SPAM_REJECT_MSG      SMTP refusal text (enhanced code, no "550"; the score is appended)
- */
-var SPAM_REJECT_SCORE   = 15.0;
-var SPAM_REJECT_HEADER  = "X-Spam-Score";
-var SPAM_REJECT_MSG     = "5.7.1 Message rejected: spam score too high";
-
-/**
- * Geographic filtering (2-letter ISO country codes in "|xx|yy|" format; "zz" = unknown country).
- * @const {string} BLOCKED_COUNTRIES  countries rejected immediately, all ports
- * @const {string} ALLOWED_GEO        only countries allowed on non-SMTP ports
- * @const {string} SMTP_PORTS         SMTP ports (transport), "|xx|yy|" format
- * @const {string} SUBMISSION_PORTS   submission/SSL ports, "|xx|yy|" format
- * @const {string} GEO_DNS_SUFFIX     domain of the DNS geolocation provider
- */
 var BLOCKED_COUNTRIES = "|cn|cz|ru|";
 var ALLOWED_GEO       = "|fr|zz|";
 var SMTP_PORTS        = "|25|587|465|";
@@ -127,6 +94,7 @@ var LOG_SOURCES = {
     AbuseIPDB:  true,
     Disconnect: true,
     Debug:      true,
+    Reject:     true,
     Spam:       true,
     System:     true
 };
@@ -325,9 +293,9 @@ function isValidIP(ip) {
 function ListedInAbuseIPDB(strIP) {
     try {
         var client = new ActiveXObject("AbuseIPDBComponent.AbuseIPDBRestClient");
-        client.SetApiKey(ABUSEIPDB_APIKEY);
-        client.SetMaxConfidenceScore(ABUSEIPDB_MAX_CONFIDENCE);
-        client.SetMaxAgeInDays(ABUSEIPDB_MAX_AGE_DAYS);
+        client.SetApiKey(ABUSEIPDB.apikey);
+        client.SetMaxConfidenceScore(ABUSEIPDB.maxConfidence);
+        client.SetMaxAgeInDays(ABUSEIPDB.maxAgeDays);
         return client.BlockEndpoint(strIP) ? true : false;
     } catch (e) {
         Log("AbuseIPDB", strIP, "", "", "error - " + e.description);
@@ -366,7 +334,22 @@ function GeoLookup(strIP) {
     } catch (e) {
         Log("System", strIP, "", "", "GeoLookup error - " + e.description);
     }
-    return geo;
+    return Trim(String(geo)).toLowerCase();
+}
+
+/**
+ * Returns whether a security range with this name already exists.
+ * @param {object} ranges  SecurityRanges collection
+ * @param {string} name    exact range name
+ * @returns {boolean}
+ */
+function rangeExists(ranges, name) {
+    try {
+        var existing = ranges.ItemByName(name);
+        return (existing != null);
+    } catch (e) {
+        return false;
+    }
 }
 
 /* ========================  Actions (ban / disconnect)  ============== */
@@ -388,17 +371,12 @@ function AutoBan(sIPAddress, sReason, iDuration, sType, geo) {
         oApp.Authenticate(ADMIN, PASSWORD);
 
         var ranges = oApp.Settings.SecurityRanges;
+        ranges.Refresh();
         var name = "(" + sReason + ") " + sIPAddress;
 
-        var exists = false;
-        try {
-            var existing = ranges.ItemByName(name);
-            if (existing != null) exists = true;
-        } catch (eLookup) {
-            exists = false;
-        }
+        if (rangeExists(ranges, name)) return added;
 
-        if (!exists) {
+        try {
             var r = ranges.Add();
             r.Name        = name;
             r.LowerIP     = sIPAddress;
@@ -416,6 +394,13 @@ function AutoBan(sIPAddress, sReason, iDuration, sType, geo) {
             r.Save();
             added = true;
             Log("AutoBan", sIPAddress, geo, "+" + iDuration + sType, sReason);
+        } catch (eSave) {
+            ranges.Refresh();
+            if (rangeExists(ranges, name)) {
+                Log("Debug", sIPAddress, geo, "", "ban already exists (concurrent) - " + sReason);
+            } else {
+                Log("AutoBan", sIPAddress, geo, "", "error - " + eSave.description);
+            }
         }
         ranges.Refresh();
     } catch (e) {
@@ -472,6 +457,41 @@ function Disconnect(sIPAddress, reason, geo, doLog) {
         if (doLog) Log("Disconnect", sIPAddress, geo, "", reason);
     } catch (e) {
         Log("System", sIPAddress, "", "", "Disconnect error - " + e.description);
+    }
+}
+
+/**
+ * Refuses the current session/message at SMTP level (5xx code + message) with no
+ * persistent ban, and logs one line.
+ * @param {string} ip
+ * @param {string} reason     logged detail
+ * @param {string} geo
+ * @param {string} msg        SMTP message returned to the client
+ * @param {string} logSource  log source ("Reject", "Spam"...)
+ */
+function rejectSMTP(ip, reason, geo, msg, logSource) {
+    Result.Value = 2;
+    Result.Message = msg;
+    Log(logSource, ip, geo, "", reason);
+}
+
+/**
+ * Applies a filtering feature's configured action:
+ *  - "ban"    : temporary (persistent) security range then disconnect;
+ *  - "reject" : refuses only the current session (SMTP message if the event allows), no ban.
+ * @param {{action:string,ban:{qty:number,unit:string},msg:string}} cfg
+ * @param {string}  ip
+ * @param {string}  reason      range name + log detail (e.g. "Bad Country 143")
+ * @param {string}  geo
+ * @param {boolean} canMessage  true if the event can return an SMTP message
+ */
+function enforce(cfg, ip, reason, geo, canMessage) {
+    if (cfg.action === "reject") {
+        if (canMessage) { rejectSMTP(ip, reason, geo, cfg.msg, "Reject"); }
+        else            { Log("Reject", ip, geo, "", reason); Disconnect(ip, reason, geo, false); }
+    } else {
+        if (canMessage) Result.Value = 1;
+        BanAndDisconnect(ip, reason, cfg.ban, geo);
     }
 }
 
@@ -580,7 +600,7 @@ function RcptUnknownCount(ip) {
         if (!gotLock) { Log("Debug", ip, "", "", "rcpt-counter lock busy, skipped"); return; }
 
         var now = Math.round(new Date().getTime() / 1000);
-        var windowSec = RCPT_UNKNOWN_WINDOW_MIN * 60;
+        var windowSec = RCPTPROBE.windowMin * 60;
         var map = readCounter(fso, dataPath, now, windowSec);
 
         var e = map[ip];
@@ -588,12 +608,12 @@ function RcptUnknownCount(ip) {
         else                                   { e = { count: 1, first: now }; }
         map[ip] = e;
 
-        if (e.count >= RCPT_UNKNOWN_THRESHOLD) {
+        if (e.count >= RCPTPROBE.threshold) {
             delete map[ip];
             writeCounter(fso, dataPath, map);
             releaseLock(fso, lockPath); gotLock = false;
             var geo = GeoLookup(ip);
-            BanAndDisconnect(ip, "Rcpt probe", RCPT_UNKNOWN_BAN, geo);
+            enforce(RCPTPROBE, ip, "Rcpt probe", geo, false);
         } else {
             writeCounter(fso, dataPath, map);
         }
@@ -612,13 +632,13 @@ function RcptUnknownCount(ip) {
  */
 function OnClientLogon(oClient) {
     try {
-        if (!UNKNOWNUSER_ENABLED) return;
+        if (!UNKNOWNUSER.enabled) return;
         var ip = String(oClient.IPAddress);
         if (isLocalIP(ip)) return;
 
         if (!oClient.Authenticated) {
             var geo = GeoLookup(ip);
-            BanAndDisconnect(ip, "Unknown USER " + oClient.Port + " - " + oClient.Username, BAN_UNKNOWNUSER, geo);
+            enforce(UNKNOWNUSER, ip, "Unknown USER " + oClient.Port + " - " + oClient.Username, geo, false);
         }
     } catch (e) {
         try { Log("System", "", "", "", "OnClientLogon error - " + e.description); } catch (e2) {}
@@ -639,27 +659,23 @@ function OnClientConnect(oClient) {
         if (isLocalIP(ip)) return;
 
         var port = String(oClient.Port);
-        var geo  = (GEOBLOCK_ENABLED || GEORESTRICT_ENABLED || ABUSEIPDB_ENABLED) ? GeoLookup(ip) : "-";
+        var geo  = (GEOBLOCK.enabled || GEORESTRICT.enabled || ABUSEIPDB.enabled) ? GeoLookup(ip) : "-";
 
-        if (GEOBLOCK_ENABLED && BLOCKED_COUNTRIES.indexOf("|" + geo + "|") > -1) {
-            Result.Value = 1;
-            BanAndDisconnect(ip, "Bad Country " + port, BAN_BADCOUNTRY, geo);
+        if (GEOBLOCK.enabled && BLOCKED_COUNTRIES.indexOf("|" + geo + "|") > -1) {
+            enforce(GEOBLOCK, ip, "Bad Country " + port, geo, true);
             return;
         }
 
-        if (GEORESTRICT_ENABLED && SMTP_PORTS.indexOf("|" + port + "|") === -1) {
+        if (GEORESTRICT.enabled && SMTP_PORTS.indexOf("|" + port + "|") === -1) {
             if (ALLOWED_GEO.indexOf("|" + geo + "|") === -1) {
-                Result.Value = 1;
-                BanAndDisconnect(ip, "Geo restrict " + port, BAN_GEORESTRICT, geo);
+                enforce(GEORESTRICT, ip, "Geo restrict " + port, geo, true);
                 return;
             }
         }
 
-        if (ABUSEIPDB_ENABLED && SUBMISSION_PORTS.indexOf("|" + port + "|") > -1) {
+        if (ABUSEIPDB.enabled && SUBMISSION_PORTS.indexOf("|" + port + "|") > -1) {
             if (ListedInAbuseIPDB(ip)) {
-                Result.Message = ABUSEIPDB_REJECT_MSG;
-                Result.Value = 2;
-                BanAndDisconnect(ip, "AbuseIPDB " + port, BAN_ABUSEIPDB, geo);
+                enforce(ABUSEIPDB, ip, "AbuseIPDB " + port, geo, true);
                 return;
             }
         }
@@ -670,21 +686,20 @@ function OnClientConnect(oClient) {
 
 /**
  * Rejects, at SMTP level, messages whose spam score exceeds the threshold.
- * Inactive while SPAM_REJECT_ENABLED is false. Anti-spam tests run before this
+ * Inactive while SPAMREJECT.enabled is false. Anti-spam tests run before this
  * event, so the score is already available in the headers.
  * @param {object} oClient
  * @param {object} oMessage
  */
 function OnAcceptMessage(oClient, oMessage) {
     try {
-        if (!SPAM_REJECT_ENABLED) return;
+        if (!SPAMREJECT.enabled) return;
 
-        var score = parseSpamScore(oMessage.HeaderValue(SPAM_REJECT_HEADER));
-        if (!isNaN(score) && score >= SPAM_REJECT_SCORE) {
-            Result.Value = 2;
-            Result.Message = SPAM_REJECT_MSG + " (" + score + ")";
+        var score = parseSpamScore(oMessage.HeaderValue(SPAMREJECT.header));
+        if (!isNaN(score) && score >= SPAMREJECT.score) {
             var ip = oClient ? String(oClient.IPAddress) : "-";
-            Log("Spam", ip, "", "", "rejected score=" + score);
+            if (SPAMREJECT.action === "ban") BanBy(ip, "Spam " + score, SPAMREJECT.ban, GeoLookup(ip));
+            rejectSMTP(ip, "score=" + score, "", SPAMREJECT.msg + " (" + score + ")", "Spam");
         }
     } catch (e) {
         try { Log("System", "", "", "", "OnAcceptMessage error - " + e.description); } catch (e2) {}
@@ -750,7 +765,7 @@ function OnDeliverMessage(oMessage) {
  */
 function OnRecipientUnknown(oClient, oMessage) {
     try {
-        if (!RCPTPROBE_ENABLED) return;
+        if (!RCPTPROBE.enabled) return;
         var ip = String(oClient.IPAddress);
         if (isLocalIP(ip)) return;
         if (oClient.Authenticated) return;

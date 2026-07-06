@@ -68,6 +68,21 @@ var LOCK_TRIES     = 20;
 var LOCK_STALE_SEC = 30;
 
 /**
+ * SMTP rejection of messages with a spam score that is too high, in OnAcceptMessage.
+ * hMailServer's anti-spam tests (SpamAssassin included) run BEFORE this event, so the
+ * score header is already present. Disabled by default: set ENABLED to true after
+ * checking the header name produced by your configuration.
+ * @const {boolean} SPAM_REJECT_ENABLED  enable rejection (false = does nothing)
+ * @const {number}  SPAM_REJECT_SCORE    score at or above which the message is rejected
+ * @const {string}  SPAM_REJECT_HEADER   header holding the score (X-Spam-Score or X-Spam-Status)
+ * @const {string}  SPAM_REJECT_MSG      SMTP refusal text (enhanced code, no "550"; the score is appended)
+ */
+var SPAM_REJECT_ENABLED = false;
+var SPAM_REJECT_SCORE   = 15.0;
+var SPAM_REJECT_HEADER  = "X-Spam-Score";
+var SPAM_REJECT_MSG     = "5.7.1 Message rejected: spam score too high";
+
+/**
  * Geographic filtering (2-letter ISO country codes in "|xx|yy|" format; "zz" = unknown country).
  * @const {string} BLOCKED_COUNTRIES  countries rejected immediately, all ports
  * @const {string} ALLOWED_GEO        only countries allowed on non-SMTP ports
@@ -91,6 +106,7 @@ var LOG_SOURCES = {
     AbuseIPDB:  true,
     Disconnect: true,
     Debug:      true,
+    Spam:       true,
     System:     true
 };
 
@@ -180,6 +196,20 @@ function padRight(s, w) {
     s = String(s);
     while (s.length < w) s += " ";
     return s;
+}
+
+/**
+ * Extracts a numeric score from a spam header. Handles a raw score ("15.2") as well
+ * as the X-Spam-Status format ("Yes, score=15.2 required=5.0 ...").
+ * @param {*} raw  header value
+ * @returns {number} the score, or NaN if missing/unreadable
+ */
+function parseSpamScore(raw) {
+    var s = Trim(raw);
+    if (s === "") return NaN;
+    var m = s.match(/score=(-?\d+(\.\d+)?)/i);
+    if (m) return parseFloat(m[1]);
+    return parseFloat(s);
 }
 
 /**
@@ -613,6 +643,29 @@ function OnClientConnect(oClient) {
         }
     } catch (e) {
         try { Log("System", "", "", "", "OnClientConnect error - " + e.description); } catch (e2) {}
+    }
+}
+
+/**
+ * Rejects, at SMTP level, messages whose spam score exceeds the threshold.
+ * Inactive while SPAM_REJECT_ENABLED is false. Anti-spam tests run before this
+ * event, so the score is already available in the headers.
+ * @param {object} oClient
+ * @param {object} oMessage
+ */
+function OnAcceptMessage(oClient, oMessage) {
+    try {
+        if (!SPAM_REJECT_ENABLED) return;
+
+        var score = parseSpamScore(oMessage.HeaderValue(SPAM_REJECT_HEADER));
+        if (!isNaN(score) && score >= SPAM_REJECT_SCORE) {
+            Result.Value = 2;
+            Result.Message = SPAM_REJECT_MSG + " (" + score + ")";
+            var ip = oClient ? String(oClient.IPAddress) : "-";
+            Log("Spam", ip, "", "", "rejected score=" + score);
+        }
+    } catch (e) {
+        try { Log("System", "", "", "", "OnAcceptMessage error - " + e.description); } catch (e2) {}
     }
 }
 

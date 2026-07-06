@@ -29,8 +29,10 @@ outbound headers, and writes a single, column-aligned log file per day.
 * Daily log with fixed-width, aligned columns, UTF-8 without BOM. One line per
   event.
 
-Each ban is applied as a temporary IP range in hMailServer, so a banned host is
-dropped before it reaches the script on its next attempt.
+Each filtering feature can be enabled or disabled, and set to **ban** (a temporary
+IP range in hMailServer, so a banned host is dropped before it reaches the script
+again) or **reject** (refuse only the current session with a professional SMTP
+message, without a persistent ban).
 
 ### Requirements
 
@@ -69,17 +71,24 @@ All settings sit at the top of the file:
 * Admin credentials used to create the bans (`ADMIN`, `PASSWORD`).
 * `LOGDIR`, `LOGPREFIX`, `DISCONNECT_EXE`: log folder, log file prefix and path
   to `Disconnect.exe`.
-* `ABUSEIPDB_APIKEY` and the AbuseIPDB thresholds.
-* `BAN_*`: ban duration per case (`{ qty, unit }`, unit is `d`/`h`/`n`/`s`).
-  Set `qty` to `0` to disconnect without banning.
+* One object per filtering feature — `GEOBLOCK`, `GEORESTRICT`, `ABUSEIPDB`,
+  `UNKNOWNUSER`, `RCPTPROBE`, `SPAMREJECT` — each with:
+  * `enabled`: turn the feature on or off.
+  * `action`: `"ban"` (temporary IP-range ban + disconnect) or `"reject"` (refuse
+    only the current session with a professional SMTP message, no ban).
+  * `ban`: `{ qty, unit }` duration (unit `d`/`h`/`n`/`s`), used in `"ban"` mode;
+    `qty` `0` disconnects without banning.
+  * `msg`: the SMTP message returned in `"reject"` mode.
+  * plus feature-specific fields: `ABUSEIPDB` has `apikey`, `maxConfidence`,
+    `maxAgeDays`; `RCPTPROBE` has `threshold`, `windowMin`; `SPAMREJECT` has
+    `score`, `header`. `SPAMREJECT` is off by default.
+* `RECEIVEDANON_ENABLED`, `MESSAGEID_ENABLED`, `SPAMREPORT_ENABLED`: on/off flags
+  for the header-transform features.
 * `BLOCKED_COUNTRIES`, `ALLOWED_GEO`, `SMTP_PORTS`, `SUBMISSION_PORTS`:
   pipe-delimited lists such as `"|cn|cz|ru|"`.
-* `RCPT_UNKNOWN_*`: threshold, window and ban duration for the recipient-probe
-  counter.
-* `LOG_SOURCES`: turn each log category on or off.
-* `SPAM_REJECT_*`: optional rejection of high-spam-score messages (enable flag,
-  score threshold, header name to read, refusal text). Off by default.
-* Local network exemption (`LOCAL_IP_PREFIX`, `LOCALHOST_IP`).
+* `BAN_PRIORITY`, `LOG_SOURCES`, local network exemption (`LOCAL_IP_PREFIX`,
+  `LOCALHOST_IP`), and the recipient-probe counter files (`RCPT_DATA_FILE`,
+  `RCPT_LOCK_FILE`, `LOCK_TRIES`, `LOCK_STALE_SEC`).
 
 ### Order of checks on connect
 
@@ -100,15 +109,21 @@ columns:
 ```
 
 Columns: date and time, source, IP, country, ban duration, detail. Fields are
-separated by two or more spaces, so a log line can be split on `/ {2,}/`.
+separated by two or more spaces, so a log line can be split on `/ {2,}/`. The
+`source` column is one of `AutoBan`, `Disconnect`, `Reject`, `Spam`, `AbuseIPDB`,
+`GeoLookup`, `Debug`, `System`.
 
 ### Notes
 
 * Geographic restriction on non-SMTP ports can also lock out a legitimate user
-  who reads mail over IMAP/POP from abroad. Keep the ban short, or set
-  `BAN_GEORESTRICT` `qty` to `0` to only disconnect.
+  who reads mail over IMAP/POP from abroad. Keep the ban short, set
+  `GEORESTRICT.ban.qty` to `0` to only disconnect, or `GEORESTRICT.action` to
+  `"reject"` to avoid a persistent ban.
 * Bans are stored as IP ranges and are removed automatically when they expire.
   Long ban durations on high-volume sources will accumulate more ranges.
+* Two simultaneous connections from the same host can both try to create the same
+  ban; the duplicate is handled safely and logged once at `Debug` level, not as an
+  error.
 * Spam-score rejection is off by default and needs an anti-spam layer that adds
   a score header before the message is accepted (SpamAssassin does this). If you
   also use hMailServer's built-in spam delete threshold, keep only one of the
@@ -151,9 +166,10 @@ sortants et écrit un seul fichier de log par jour, en colonnes alignées.
 * Log quotidien en colonnes de largeur fixe, UTF-8 sans BOM. Une ligne par
   évènement.
 
-Chaque bannissement est posé comme plage d'IP temporaire dans hMailServer :
-l'hôte banni est donc coupé avant même d'atteindre le script à sa tentative
-suivante.
+Chaque fonction de filtrage peut être activée ou désactivée, et réglée sur **ban**
+(plage d'IP temporaire dans hMailServer : l'hôte banni est coupé avant même
+d'atteindre le script à sa tentative suivante) ou **reject** (refus de la seule
+session courante avec un message SMTP professionnel, sans ban persistant).
 
 ### Prérequis
 
@@ -196,16 +212,24 @@ Tous les paramètres se trouvent en tête de fichier :
 * Identifiants d'administration servant à créer les bans (`ADMIN`, `PASSWORD`).
 * `LOGDIR`, `LOGPREFIX`, `DISCONNECT_EXE` : dossier des logs, préfixe du fichier
   et chemin vers `Disconnect.exe`.
-* `ABUSEIPDB_APIKEY` et les seuils AbuseIPDB.
-* `BAN_*` : durée de ban par cas (`{ qty, unit }`, l'unité est `d`/`h`/`n`/`s`).
-  Mettez `qty` à `0` pour déconnecter sans bannir.
+* Un objet par fonction de filtrage — `GEOBLOCK`, `GEORESTRICT`, `ABUSEIPDB`,
+  `UNKNOWNUSER`, `RCPTPROBE`, `SPAMREJECT` — chacun avec :
+  * `enabled` : active ou désactive la fonction.
+  * `action` : `"ban"` (ban temporaire par plage d'IP + déconnexion) ou `"reject"`
+    (refus de la seule session courante avec un message SMTP professionnel, sans ban).
+  * `ban` : durée `{ qty, unit }` (unité `d`/`h`/`n`/`s`), utilisée en mode `"ban"` ;
+    `qty` à `0` déconnecte sans bannir.
+  * `msg` : le message SMTP renvoyé en mode `"reject"`.
+  * plus des champs propres à la fonction : `ABUSEIPDB` a `apikey`, `maxConfidence`,
+    `maxAgeDays` ; `RCPTPROBE` a `threshold`, `windowMin` ; `SPAMREJECT` a `score`,
+    `header`. `SPAMREJECT` est désactivé par défaut.
+* `RECEIVEDANON_ENABLED`, `MESSAGEID_ENABLED`, `SPAMREPORT_ENABLED` : drapeaux
+  d'activation des fonctions de transformation d'en-têtes.
 * `BLOCKED_COUNTRIES`, `ALLOWED_GEO`, `SMTP_PORTS`, `SUBMISSION_PORTS` : listes
   délimitées par des barres, par exemple `"|cn|cz|ru|"`.
-* `RCPT_UNKNOWN_*` : seuil, fenêtre et durée de ban du compteur de sondes.
-* `LOG_SOURCES` : active ou coupe chaque catégorie de log.
-* `SPAM_REJECT_*` : rejet optionnel des messages à score de spam élevé (drapeau
-  d'activation, seuil, nom de l'en-tête à lire, texte du refus). Désactivé par défaut.
-* Exemption du réseau local (`LOCAL_IP_PREFIX`, `LOCALHOST_IP`).
+* `BAN_PRIORITY`, `LOG_SOURCES`, exemption du réseau local (`LOCAL_IP_PREFIX`,
+  `LOCALHOST_IP`) et les fichiers du compteur de sondes (`RCPT_DATA_FILE`,
+  `RCPT_LOCK_FILE`, `LOCK_TRIES`, `LOCK_STALE_SEC`).
 
 ### Ordre des contrôles à la connexion
 
@@ -227,17 +251,20 @@ colonnes fixes :
 
 Colonnes : date et heure, source, IP, pays, durée de ban, détail. Les champs
 sont séparés par au moins deux espaces, on peut donc découper une ligne sur
-`/ {2,}/`.
+`/ {2,}/`. La colonne `source` vaut `AutoBan`, `Disconnect`, `Reject`, `Spam`,
+`AbuseIPDB`, `GeoLookup`, `Debug` ou `System`.
 
 ### Remarques
 
 * La restriction géographique sur les ports non-SMTP peut aussi bloquer un
   utilisateur légitime qui relève son courrier en IMAP/POP depuis l'étranger.
-  Gardez une durée de ban courte, ou mettez `qty` à `0` sur `BAN_GEORESTRICT`
-  pour seulement déconnecter.
+  Gardez une durée de ban courte, mettez `GEORESTRICT.ban.qty` à `0` pour seulement
+  déconnecter, ou `GEORESTRICT.action` à `"reject"` pour éviter un ban persistant.
 * Les bans sont stockés en plages d'IP et supprimés automatiquement à
   expiration. Des durées longues sur des sources à fort volume accumulent
   davantage de plages.
+* Deux connexions simultanées d'un même hôte peuvent tenter de créer le même ban ;
+  le doublon est géré proprement et journalisé une fois en `Debug`, pas en erreur.
 * Le rejet sur score de spam est désactivé par défaut et suppose une couche
   anti-spam qui ajoute un en-tête de score avant l'acceptation du message
   (SpamAssassin le fait). Si tu utilises aussi le seuil de suppression natif de

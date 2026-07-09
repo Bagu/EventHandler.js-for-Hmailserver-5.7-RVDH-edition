@@ -70,11 +70,13 @@ var BAN_PRIORITY = 20;
  * RCPTPROBE: threshold, windowMin, ban). No database required.
  * @const {string} RCPT_DATA_FILE  counter file name (inside LOGDIR)
  * @const {string} RCPT_LOCK_FILE  lock file name (inside LOGDIR)
+ * @const {string} BAN_LOCK_FILE   global lock file serialising AutoBan (prevents duplicate rangename / HM5032)
  * @const {number} LOCK_TRIES      number of lock acquisition attempts
  * @const {number} LOCK_STALE_SEC  age (s) beyond which a lock is considered orphaned
  */
 var RCPT_DATA_FILE = "rcpt_unknown.dat";
 var RCPT_LOCK_FILE = "rcpt_unknown.lock";
+var BAN_LOCK_FILE  = "autoban.lock";
 var LOCK_TRIES     = 20;
 var LOCK_STALE_SEC = 30;
 
@@ -366,7 +368,15 @@ function rangeExists(ranges, name) {
  */
 function AutoBan(sIPAddress, sReason, iDuration, sType, geo) {
     var added = false;
+    var fso, gotLock = false;
+    var lockPath = LOGDIR + "\\" + BAN_LOCK_FILE;
     try {
+        // Verrou global : sérialise check+insert entre threads (supprime le doublon rangename / HM5032).
+        // Si le verrou n'est pas obtenu (contention extrême), on poursuit en mode dégradé : le catch eSave absorbe le doublon éventuel.
+        fso = new ActiveXObject("Scripting.FileSystemObject");
+        if (!fso.FolderExists(LOGDIR)) { try { fso.CreateFolder(LOGDIR); } catch (eF) {} }
+        gotLock = acquireLock(fso, lockPath, LOCK_TRIES);
+
         var oApp = new ActiveXObject("hMailServer.Application");
         oApp.Authenticate(ADMIN, PASSWORD);
 
@@ -374,7 +384,10 @@ function AutoBan(sIPAddress, sReason, iDuration, sType, geo) {
         ranges.Refresh();
         var name = "(" + sReason + ") " + sIPAddress;
 
-        if (rangeExists(ranges, name)) return added;
+        if (rangeExists(ranges, name)) {
+            if (gotLock) { releaseLock(fso, lockPath); gotLock = false; }
+            return added;
+        }
 
         try {
             var r = ranges.Add();
@@ -406,6 +419,7 @@ function AutoBan(sIPAddress, sReason, iDuration, sType, geo) {
     } catch (e) {
         Log("AutoBan", sIPAddress, geo, "", "error - " + e.description);
     }
+    if (gotLock) releaseLock(fso, lockPath);
     return added;
 }
 

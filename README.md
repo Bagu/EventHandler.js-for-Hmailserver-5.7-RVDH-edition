@@ -4,8 +4,9 @@
 
 A set of hMailServer event handlers written in JScript. It filters inbound
 connections and auto-bans abusive hosts (geographic filtering, AbuseIPDB
-reputation, failed-login and recipient-harvesting protection), cleans up a few
-outbound headers, and writes a single, column-aligned log file per day.
+reputation, failed-login, recipient-harvesting and connection-flood protection),
+cleans up a few outbound headers, and writes a single, column-aligned log file
+per day.
 
 ---
 
@@ -21,6 +22,10 @@ outbound headers, and writes a single, column-aligned log file per day.
 * Recipient-probe (directory harvesting) protection: bans an IP after a number
   of unknown recipients within a sliding window. Uses a small counter file, no
   database.
+* Connection-flood auto-ban: bans an IP that opens too many connections within a
+  sliding window. Catches brute-force bursts that never complete a login (for
+  example repeated pre-STARTTLS AUTH attempts answered with `504`), which do not
+  trigger the failed-login handler. Uses a small counter file, no database.
 * Outbound `Received` header anonymisation (removes the client IP).
 * Fills a missing `Message-Id` and reformats `X-Spam-Report` so it is readable.
 * Optional SMTP rejection of messages whose spam score is above a threshold. It
@@ -72,7 +77,7 @@ All settings sit at the top of the file:
 * `LOGDIR`, `LOGPREFIX`, `DISCONNECT_EXE`: log folder, log file prefix and path
   to `Disconnect.exe`.
 * One object per filtering feature — `GEOBLOCK`, `GEORESTRICT`, `ABUSEIPDB`,
-  `UNKNOWNUSER`, `RCPTPROBE`, `SPAMREJECT` — each with:
+  `UNKNOWNUSER`, `RCPTPROBE`, `CONNFLOOD`, `SPAMREJECT` — each with:
   * `enabled`: turn the feature on or off.
   * `action`: `"ban"` (temporary IP-range ban + disconnect) or `"reject"` (refuse
     only the current session with a professional SMTP message, no ban).
@@ -80,22 +85,31 @@ All settings sit at the top of the file:
     `qty` `0` disconnects without banning.
   * `msg`: the SMTP message returned in `"reject"` mode.
   * plus feature-specific fields: `ABUSEIPDB` has `apikey`, `maxConfidence`,
-    `maxAgeDays`; `RCPTPROBE` has `threshold`, `windowMin`; `SPAMREJECT` has
-    `score`, `header`. `SPAMREJECT` is off by default.
+    `maxAgeDays`; `RCPTPROBE` has `threshold`, `windowMin`; `CONNFLOOD` has
+    `threshold`, `windowMin`; `SPAMREJECT` has `score`, `header`. `SPAMREJECT` is
+    off by default.
 * `RECEIVEDANON_ENABLED`, `MESSAGEID_ENABLED`, `SPAMREPORT_ENABLED`: on/off flags
   for the header-transform features.
 * `BLOCKED_COUNTRIES`, `ALLOWED_GEO`, `SMTP_PORTS`, `SUBMISSION_PORTS`:
   pipe-delimited lists such as `"|cn|cz|ru|"`.
 * `BAN_PRIORITY`, `LOG_SOURCES`, local network exemption (`LOCAL_IP_PREFIX`,
-  `LOCALHOST_IP`), and the recipient-probe counter files (`RCPT_DATA_FILE`,
-  `RCPT_LOCK_FILE`, `LOCK_TRIES`, `LOCK_STALE_SEC`).
+  `LOCALHOST_IP`), and the sliding-window counter files: recipient-probe
+  (`RCPT_DATA_FILE`, `RCPT_LOCK_FILE`) and connection-flood (`CONN_DATA_FILE`,
+  `CONN_LOCK_FILE`), plus `LOCK_TRIES`, `LOCK_STALE_SEC`.
+
+> **Connection-flood tuning.** `CONNFLOOD.threshold` connections within
+> `CONNFLOOD.windowMin` minutes trigger a ban (defaults: 25 in 1 minute). The LAN
+> and localhost are exempt. Lower the threshold to be more aggressive; raise it if
+> a legitimate high-volume relay gets banned. This check runs on every connection,
+> so it adds one small file access (under a lock) per connect.
 
 ### Order of checks on connect
 
 1. Local network and localhost are skipped.
-2. Blocked country: rejected on any port.
-3. Non-SMTP port from a country outside the allowed list: rejected.
-4. Submission port with an IP listed on AbuseIPDB: rejected.
+2. Connection flood: an IP over the connection threshold is banned.
+3. Blocked country: rejected on any port.
+4. Non-SMTP port from a country outside the allowed list: rejected.
+5. Submission port with an IP listed on AbuseIPDB: rejected.
 
 ### Logging
 
@@ -106,6 +120,7 @@ columns:
 2026-07-04 00:39:59  AutoBan     111.18.196.17    cn   +7d    Bad Country 143
 2026-07-04 05:28:56  AutoBan     85.121.183.244   ro   +1d    Unknown USER 587
 2026-07-04 17:39:24  AutoBan     20.12.240.184    us   +1d    AbuseIPDB 587
+2026-07-09 11:47:15  AutoBan     193.138.195.94   zz   +1d    Conn flood 587
 ```
 
 Columns: date and time, source, IP, country, ban duration, detail. Fields are
@@ -119,6 +134,10 @@ separated by two or more spaces, so a log line can be split on `/ {2,}/`. The
   who reads mail over IMAP/POP from abroad. Keep the ban short, set
   `GEORESTRICT.ban.qty` to `0` to only disconnect, or `GEORESTRICT.action` to
   `"reject"` to avoid a persistent ban.
+* Connection-flood protection counts *every* connection, so a legitimate relay
+  that opens many short-lived connections could be banned. Raise
+  `CONNFLOOD.threshold` or widen `CONNFLOOD.windowMin` if that happens; set
+  `CONNFLOOD.enabled` to `false` to turn it off.
 * Bans are stored as IP ranges and are removed automatically when they expire.
   Long ban durations on high-volume sources will accumulate more ranges.
 * Two simultaneous connections from the same host can both try to create the same
@@ -144,8 +163,9 @@ MIT. See `LICENSE`.
 Ensemble de gestionnaires d'évènements hMailServer écrits en JScript. Il filtre
 les connexions entrantes et bannit automatiquement les hôtes abusifs (filtrage
 géographique, réputation AbuseIPDB, protection contre les échecs
-d'authentification et la collecte d'adresses), nettoie quelques en-têtes
-sortants et écrit un seul fichier de log par jour, en colonnes alignées.
+d'authentification, la collecte d'adresses et les floods de connexions), nettoie
+quelques en-têtes sortants et écrit un seul fichier de log par jour, en colonnes
+alignées.
 
 ### Fonctionnalités
 
@@ -157,6 +177,12 @@ sortants et écrit un seul fichier de log par jour, en colonnes alignées.
 * Protection contre les sondes de destinataires (collecte d'adresses) : bannit
   une IP après un certain nombre de destinataires inconnus dans une fenêtre
   glissante. Utilise un petit fichier compteur, sans base de données.
+* Bannissement automatique des floods de connexions : bannit une IP qui ouvre
+  trop de connexions dans une fenêtre glissante. Attrape les rafales de force
+  brute qui n'aboutissent jamais à une authentification (par exemple les
+  tentatives AUTH répétées avant STARTTLS, auxquelles le serveur répond `504`),
+  lesquelles ne déclenchent pas le gestionnaire d'échec d'authentification.
+  Utilise un petit fichier compteur, sans base de données.
 * Anonymisation de l'en-tête `Received` sortant (retire l'IP du client).
 * Complète un `Message-Id` manquant et remet en forme `X-Spam-Report` pour le
   rendre lisible.
@@ -213,7 +239,7 @@ Tous les paramètres se trouvent en tête de fichier :
 * `LOGDIR`, `LOGPREFIX`, `DISCONNECT_EXE` : dossier des logs, préfixe du fichier
   et chemin vers `Disconnect.exe`.
 * Un objet par fonction de filtrage — `GEOBLOCK`, `GEORESTRICT`, `ABUSEIPDB`,
-  `UNKNOWNUSER`, `RCPTPROBE`, `SPAMREJECT` — chacun avec :
+  `UNKNOWNUSER`, `RCPTPROBE`, `CONNFLOOD`, `SPAMREJECT` — chacun avec :
   * `enabled` : active ou désactive la fonction.
   * `action` : `"ban"` (ban temporaire par plage d'IP + déconnexion) ou `"reject"`
     (refus de la seule session courante avec un message SMTP professionnel, sans ban).
@@ -221,22 +247,32 @@ Tous les paramètres se trouvent en tête de fichier :
     `qty` à `0` déconnecte sans bannir.
   * `msg` : le message SMTP renvoyé en mode `"reject"`.
   * plus des champs propres à la fonction : `ABUSEIPDB` a `apikey`, `maxConfidence`,
-    `maxAgeDays` ; `RCPTPROBE` a `threshold`, `windowMin` ; `SPAMREJECT` a `score`,
-    `header`. `SPAMREJECT` est désactivé par défaut.
+    `maxAgeDays` ; `RCPTPROBE` a `threshold`, `windowMin` ; `CONNFLOOD` a
+    `threshold`, `windowMin` ; `SPAMREJECT` a `score`, `header`. `SPAMREJECT` est
+    désactivé par défaut.
 * `RECEIVEDANON_ENABLED`, `MESSAGEID_ENABLED`, `SPAMREPORT_ENABLED` : drapeaux
   d'activation des fonctions de transformation d'en-têtes.
 * `BLOCKED_COUNTRIES`, `ALLOWED_GEO`, `SMTP_PORTS`, `SUBMISSION_PORTS` : listes
   délimitées par des barres, par exemple `"|cn|cz|ru|"`.
 * `BAN_PRIORITY`, `LOG_SOURCES`, exemption du réseau local (`LOCAL_IP_PREFIX`,
-  `LOCALHOST_IP`) et les fichiers du compteur de sondes (`RCPT_DATA_FILE`,
-  `RCPT_LOCK_FILE`, `LOCK_TRIES`, `LOCK_STALE_SEC`).
+  `LOCALHOST_IP`) et les fichiers des compteurs à fenêtre glissante : sondes de
+  destinataires (`RCPT_DATA_FILE`, `RCPT_LOCK_FILE`) et flood de connexions
+  (`CONN_DATA_FILE`, `CONN_LOCK_FILE`), plus `LOCK_TRIES`, `LOCK_STALE_SEC`.
+
+> **Réglage du flood de connexions.** `CONNFLOOD.threshold` connexions dans une
+> fenêtre de `CONNFLOOD.windowMin` minutes déclenchent un ban (par défaut : 25 en
+> 1 minute). Le LAN et localhost sont exemptés. Baissez le seuil pour être plus
+> agressif ; augmentez-le si un relais légitime à fort volume est banni. Ce
+> contrôle s'exécute à chaque connexion : il ajoute un petit accès fichier (sous
+> verrou) par connexion.
 
 ### Ordre des contrôles à la connexion
 
 1. Réseau local et localhost sont ignorés.
-2. Pays bloqué : rejet sur tous les ports.
-3. Port non-SMTP depuis un pays hors liste autorisée : rejet.
-4. Port de soumission avec une IP listée sur AbuseIPDB : rejet.
+2. Flood de connexions : une IP dépassant le seuil de connexions est bannie.
+3. Pays bloqué : rejet sur tous les ports.
+4. Port non-SMTP depuis un pays hors liste autorisée : rejet.
+5. Port de soumission avec une IP listée sur AbuseIPDB : rejet.
 
 ### Journalisation
 
@@ -247,6 +283,7 @@ colonnes fixes :
 2026-07-04 00:39:59  AutoBan     111.18.196.17    cn   +7d    Bad Country 143
 2026-07-04 05:28:56  AutoBan     85.121.183.244   ro   +1d    Unknown USER 587
 2026-07-04 17:39:24  AutoBan     20.12.240.184    us   +1d    AbuseIPDB 587
+2026-07-09 11:47:15  AutoBan     193.138.195.94   zz   +1d    Conn flood 587
 ```
 
 Colonnes : date et heure, source, IP, pays, durée de ban, détail. Les champs
@@ -260,6 +297,10 @@ sont séparés par au moins deux espaces, on peut donc découper une ligne sur
   utilisateur légitime qui relève son courrier en IMAP/POP depuis l'étranger.
   Gardez une durée de ban courte, mettez `GEORESTRICT.ban.qty` à `0` pour seulement
   déconnecter, ou `GEORESTRICT.action` à `"reject"` pour éviter un ban persistant.
+* La protection contre les floods de connexions compte *toutes* les connexions :
+  un relais légitime qui ouvre beaucoup de connexions courtes peut être banni.
+  Augmentez `CONNFLOOD.threshold` ou élargissez `CONNFLOOD.windowMin` le cas
+  échéant ; mettez `CONNFLOOD.enabled` à `false` pour la désactiver.
 * Les bans sont stockés en plages d'IP et supprimés automatiquement à
   expiration. Des durées longues sur des sources à fort volume accumulent
   davantage de plages.

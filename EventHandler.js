@@ -33,6 +33,7 @@ var LOCALHOST_IP    = "127.0.0.1";
  * @const {object} ABUSEIPDB    AbuseIPDB reputation (submission ports); + apikey, maxConfidence, maxAgeDays
  * @const {object} UNKNOWNUSER  unauthenticated connection (OnClientLogon)
  * @const {object} RCPTPROBE    recipient probes (OnRecipientUnknown); + threshold, windowMin
+ * @const {object} CONNFLOOD    per-IP connection flood (OnClientConnect); + threshold, windowMin
  * @const {object} SPAMREJECT   high spam score (OnAcceptMessage); + score, header
  */
 var GEOBLOCK    = { enabled: true,  action: "ban",    ban: { qty: 7, unit: "d" },
@@ -48,6 +49,9 @@ var UNKNOWNUSER = { enabled: true,  action: "ban",    ban: { qty: 1, unit: "d" }
 var RCPTPROBE   = { enabled: true,  action: "ban",    ban: { qty: 1, unit: "d" },
                     threshold: 3, windowMin: 10,
                     msg: "5.7.1 Access denied: too many invalid recipients." };
+var CONNFLOOD   = { enabled: true,  action: "ban",    ban: { qty: 1, unit: "d" },
+                    threshold: 25, windowMin: 1,
+                    msg: "5.7.1 Access denied: too many connections." };
 var SPAMREJECT  = { enabled: false, action: "reject", ban: { qty: 1, unit: "d" },
                     score: 15.0, header: "X-Spam-Score",
                     msg: "5.7.1 Message rejected: the message was classified as spam (score too high)." };
@@ -66,16 +70,20 @@ var SPAMREPORT_ENABLED   = true;
 var BAN_PRIORITY = 20;
 
 /**
- * Recipient-probe counter — file/lock infrastructure (business parameters are in
- * RCPTPROBE: threshold, windowMin, ban). No database required.
- * @const {string} RCPT_DATA_FILE  counter file name (inside LOGDIR)
- * @const {string} RCPT_LOCK_FILE  lock file name (inside LOGDIR)
+ * Sliding-window counters — shared file/lock infrastructure (business parameters are
+ * in RCPTPROBE and CONNFLOOD: threshold, windowMin, ban). No database required.
+ * @const {string} RCPT_DATA_FILE  recipient-probe counter file (inside LOGDIR)
+ * @const {string} RCPT_LOCK_FILE  recipient-probe counter lock (inside LOGDIR)
+ * @const {string} CONN_DATA_FILE  per-IP connection counter file (inside LOGDIR)
+ * @const {string} CONN_LOCK_FILE  per-IP connection counter lock (inside LOGDIR)
  * @const {string} BAN_LOCK_FILE   global lock file serialising AutoBan (prevents duplicate rangename / HM5032)
  * @const {number} LOCK_TRIES      number of lock acquisition attempts
  * @const {number} LOCK_STALE_SEC  age (s) beyond which a lock is considered orphaned
  */
 var RCPT_DATA_FILE = "rcpt_unknown.dat";
 var RCPT_LOCK_FILE = "rcpt_unknown.lock";
+var CONN_DATA_FILE = "conn_flood.dat";
+var CONN_LOCK_FILE = "conn_flood.lock";
 var BAN_LOCK_FILE  = "autoban.lock";
 var LOCK_TRIES     = 20;
 var LOCK_STALE_SEC = 30;
@@ -638,6 +646,56 @@ function RcptUnknownCount(ip) {
     }
 }
 
+/**
+ * Counts connections per IP over a sliding window; bans on threshold.
+ * Guards against connection floods (e.g. pre-STARTTLS AUTH brute-force -> 504),
+ * which do not trigger OnClientLogon. Best-effort, lock-guarded, never propagates
+ * an exception to the mail flow. The ban+disconnect also rejects the current
+ * connection (Result.Value = 1 via enforce).
+ * @param {string} ip    source IP address
+ * @param {string} port  SMTP port (for the ban label)
+ * @returns {boolean} true if the IP was just banned (caller must return)
+ */
+function ConnFloodCount(ip, port) {
+    if (!isValidIP(ip)) return false;
+
+    var fso, gotLock = false, banned = false;
+    var dataPath = LOGDIR + "\\" + CONN_DATA_FILE;
+    var lockPath = LOGDIR + "\\" + CONN_LOCK_FILE;
+    try {
+        fso = new ActiveXObject("Scripting.FileSystemObject");
+        if (!fso.FolderExists(LOGDIR)) { try { fso.CreateFolder(LOGDIR); } catch (eF) {} }
+
+        gotLock = acquireLock(fso, lockPath, LOCK_TRIES);
+        if (!gotLock) { Log("Debug", ip, "", "", "conn-counter lock busy, skipped"); return false; }
+
+        var now = Math.round(new Date().getTime() / 1000);
+        var windowSec = CONNFLOOD.windowMin * 60;
+        var map = readCounter(fso, dataPath, now, windowSec);
+
+        var e = map[ip];
+        if (e && (now - e.first) <= windowSec) { e.count = e.count + 1; }
+        else                                   { e = { count: 1, first: now }; }
+        map[ip] = e;
+
+        if (e.count >= CONNFLOOD.threshold) {
+            delete map[ip];
+            writeCounter(fso, dataPath, map);
+            releaseLock(fso, lockPath); gotLock = false;
+            var geo = GeoLookup(ip);
+            enforce(CONNFLOOD, ip, "Conn flood " + port, geo, true);
+            banned = true;
+        } else {
+            writeCounter(fso, dataPath, map);
+        }
+    } catch (eMain) {
+        try { Log("System", ip, "", "", "conn-counter error - " + eMain.description); } catch (e2) {}
+    } finally {
+        if (gotLock) releaseLock(fso, lockPath);
+    }
+    return banned;
+}
+
 /* ======================  hMailServer event triggers  ================= */
 
 /**
@@ -661,6 +719,7 @@ function OnClientLogon(oClient) {
 
 /**
  * Connection-time filtering (first excludes LAN 172.16.x and localhost):
+ * 0) bans IPs exceeding the connection threshold (CONNFLOOD, sliding window);
  * 1) rejects countries in BLOCKED_COUNTRIES;
  * 2) on non-SMTP ports, only allows countries in ALLOWED_GEO;
  * 3) on submission ports (587/465), rejects IPs listed on AbuseIPDB.
@@ -673,6 +732,9 @@ function OnClientConnect(oClient) {
         if (isLocalIP(ip)) return;
 
         var port = String(oClient.Port);
+
+        if (CONNFLOOD.enabled && ConnFloodCount(ip, port)) return;
+
         var geo  = (GEOBLOCK.enabled || GEORESTRICT.enabled || ABUSEIPDB.enabled) ? GeoLookup(ip) : "-";
 
         if (GEOBLOCK.enabled && BLOCKED_COUNTRIES.indexOf("|" + geo + "|") > -1) {
